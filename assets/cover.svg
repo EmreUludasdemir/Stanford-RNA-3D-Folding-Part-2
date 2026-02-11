@@ -1,0 +1,43 @@
+<svg width="1600" height="420" viewBox="0 0 1600 420" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Stanford RNA 3D Folding 2 Banner">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0b1220"/>
+      <stop offset="50%" stop-color="#13243b"/>
+      <stop offset="100%" stop-color="#0a5b6b"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#2dd4bf"/>
+      <stop offset="100%" stop-color="#38bdf8"/>
+    </linearGradient>
+    <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8"/>
+    </filter>
+  </defs>
+
+  <rect width="1600" height="420" fill="url(#bg)"/>
+
+  <circle cx="1380" cy="90" r="110" fill="#38bdf8" opacity="0.15" filter="url(#soft)"/>
+  <circle cx="120" cy="350" r="130" fill="#2dd4bf" opacity="0.12" filter="url(#soft)"/>
+  <circle cx="1540" cy="360" r="90" fill="#0ea5e9" opacity="0.12" filter="url(#soft)"/>
+
+  <path d="M80 280 C 260 120, 420 360, 620 200 C 800 60, 980 340, 1180 180 C 1320 80, 1460 240, 1540 150"
+        stroke="url(#accent)" stroke-width="8" fill="none" stroke-linecap="round" opacity="0.9"/>
+  <path d="M80 320 C 260 160, 420 400, 620 240 C 800 100, 980 380, 1180 220 C 1320 120, 1460 280, 1540 190"
+        stroke="#7dd3fc" stroke-width="3" fill="none" stroke-linecap="round" opacity="0.55"/>
+
+  <g fill="#e2e8f0">
+    <text x="80" y="120" font-family="Segoe UI, Arial, sans-serif" font-size="52" font-weight="700">
+      Stanford RNA 3D Folding 2
+    </text>
+    <text x="80" y="176" font-family="Segoe UI, Arial, sans-serif" font-size="28" font-weight="500" opacity="0.95">
+      Hybrid TBM + Ab-Initio Pipeline for Leaderboard Optimization
+    </text>
+  </g>
+
+  <g fill="none" stroke="#67e8f9" stroke-width="2" opacity="0.45">
+    <rect x="74" y="214" width="380" height="42" rx="21"/>
+  </g>
+  <text x="96" y="242" fill="#cffafe" font-family="Consolas, Menlo, monospace" font-size="18">
+    C1' Coordinates | 5-Model Ensemble
+  </text>
+</svg>

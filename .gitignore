@@ -1,0 +1,21 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Tool caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Notebook artifacts
+.ipynb_checkpoints/
+
+# Local output artifacts
+submission.csv
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
