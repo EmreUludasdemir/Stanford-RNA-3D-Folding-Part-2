@@ -55,7 +55,14 @@ COVERAGE_THRESHOLD = 0.40
 NOISE_SCALES = [0.0, 0.15, 0.30, 0.50, 0.75]
 LONG_SEQUENCE_THRESHOLD = 1200
 SHORT_PREFILTER_CAP = 300
-LONG_PREFILTER_CAP = 80
+LONG_PREFILTER_CAP = 180
+LONG_KMER_THRESHOLD = 0.08
+LONG_QUICK_IDENTITY = 0.08
+LONG_QUICK_COVERAGE = 0.12
+LONG_SW_REFINE_CANDIDATES = 18
+LONG_SW_IDENTITY_THRESHOLD = 0.16
+LONG_SW_COVERAGE_THRESHOLD = 0.22
+LONG_FALLBACK_SW_CANDIDATES = 32
 RANDOM_SEED = 42
 np.random.seed(RANDOM_SEED)
 
@@ -557,6 +564,55 @@ def ensemble_coordinates(coord_list, weight_list=None):
     return result
 
 
+def coverage_consensus_coordinates(coord_list, score_list=None):
+    """
+    Build a residue-wise consensus by taking coordinates from the highest-scoring
+    template that has a valid value at each position.
+    """
+    if not coord_list:
+        return None
+    if len(coord_list) == 1:
+        return coord_list[0].copy()
+
+    n = len(coord_list[0])
+    if score_list is None:
+        score_list = [1.0] * len(coord_list)
+
+    order = np.argsort(np.asarray(score_list))[::-1]
+    result = np.full((n, 3), np.nan)
+    source = np.full(n, -1, dtype=np.int32)
+
+    for rank_idx in order:
+        coords = coord_list[int(rank_idx)]
+        valid = ~np.isnan(coords[:, 0])
+        take = np.isnan(result[:, 0]) & valid
+        result[take] = coords[take]
+        source[take] = int(rank_idx)
+
+    # Light smoothing around template-switch boundaries.
+    for i in range(1, n - 1):
+        if source[i] < 0:
+            continue
+        if source[i] != source[i - 1] or source[i] != source[i + 1]:
+            if (not np.isnan(result[i - 1, 0])) and (not np.isnan(result[i + 1, 0])):
+                result[i] = 0.25 * result[i - 1] + 0.5 * result[i] + 0.25 * result[i + 1]
+
+    return interpolate_coords(result)
+
+
+def diversify_prediction(base_coords, alt_coords=None, noise_scale=0.08):
+    """
+    Create a conservative variant to avoid duplicate models.
+    Keeps geometry close to templates while introducing meaningful diversity.
+    """
+    pred = base_coords.copy()
+    if alt_coords is not None and len(alt_coords) == len(base_coords):
+        pred = 0.85 * pred + 0.15 * alt_coords
+    if np.allclose(pred, base_coords, atol=1e-5, rtol=0.0):
+        pred = pred + np.random.randn(*pred.shape) * noise_scale
+    return interpolate_coords(pred)
+
+
 # ============================================================================
 # TEMPLATE SEARCH ENGINE
 # ============================================================================
@@ -653,19 +709,34 @@ class TemplateSearchEngine:
         """3-stage template search: kmer -> SW -> rank"""
         query_kmer = kmer_profile(query_seq)
         query_len = len(query_seq)
-        prefilter_cap = LONG_PREFILTER_CAP if query_len >= LONG_SEQUENCE_THRESHOLD else SHORT_PREFILTER_CAP
+        is_long = query_len >= LONG_SEQUENCE_THRESHOLD
+        prefilter_cap = LONG_PREFILTER_CAP if is_long else SHORT_PREFILTER_CAP
+        kmer_threshold = LONG_KMER_THRESHOLD if is_long else 0.12
 
         # Stage 1: K-mer prefilter
         candidates = []
         for tid, tkmer in self.kmer_index.items():
             sim = kmer_similarity(query_kmer, tkmer)
-            if sim > 0.12:
+            if sim > kmer_threshold:
                 candidates.append((tid, sim))
         candidates.sort(key=lambda x: x[1], reverse=True)
         candidates = candidates[:prefilter_cap]
 
-        # Stage 2: SW alignment
-        results = []
+        # Stage 2: alignment + scoring
+        results_map = {}
+        preliminary = []
+
+        def add_result(item):
+            prev = results_map.get(item['template_id'])
+            if prev is None or item['score'] > prev['score']:
+                results_map[item['template_id']] = item
+
+        def calc_composite(score, identity, coverage, len_ratio, template_id):
+            composite = (identity * 0.5 + coverage * 0.3 + len_ratio * 0.2) * score
+            if template_id in self.templates:
+                composite *= 1.3
+            return composite
+
         for tid, kmer_sim in candidates:
             t_seq = self._get_sequence(tid)
             if not t_seq or len(t_seq) < 5:
@@ -682,18 +753,27 @@ class TemplateSearchEngine:
                 if release and release > str(temporal_cutoff):
                     continue
 
-            score, identity, coverage, pairs = align_sequences(query_seq, t_seq)
+            if is_long:
+                score, identity, coverage, pairs = fast_long_align(query_seq, t_seq)
+                if identity < LONG_QUICK_IDENTITY or coverage < LONG_QUICK_COVERAGE:
+                    continue
+                composite = calc_composite(score, identity, coverage, len_ratio, tid)
+                preliminary.append({
+                    'template_id': tid,
+                    'score': composite,
+                    'identity': identity,
+                    'coverage': coverage,
+                    'pairs': pairs,
+                    'template_seq': t_seq
+                })
+                continue
+
+            score, identity, coverage, pairs = sw_align(query_seq, t_seq)
             if identity < IDENTITY_THRESHOLD or coverage < COVERAGE_THRESHOLD:
                 continue
 
-            # Weighted composite score
-            composite = (identity * 0.5 + coverage * 0.3 + len_ratio * 0.2) * score
-
-            # Bonus for training templates (known good coordinates)
-            if tid in self.templates:
-                composite *= 1.3
-
-            results.append({
+            composite = calc_composite(score, identity, coverage, len_ratio, tid)
+            add_result({
                 'template_id': tid,
                 'score': composite,
                 'identity': identity,
@@ -702,6 +782,67 @@ class TemplateSearchEngine:
                 'template_seq': t_seq
             })
 
+        if is_long:
+            preliminary.sort(key=lambda x: x['score'], reverse=True)
+
+            # Refine top long-sequence candidates with SW (SW truncates at 2000, but gives better local signal).
+            for cand in preliminary[:LONG_SW_REFINE_CANDIDATES]:
+                t_seq = cand['template_seq']
+                len_ratio = min(len(t_seq), query_len) / max(len(t_seq), query_len)
+                score, identity, coverage, sw_pairs = sw_align(query_seq, t_seq)
+                if identity < LONG_SW_IDENTITY_THRESHOLD or coverage < LONG_SW_COVERAGE_THRESHOLD:
+                    continue
+
+                final_pairs = sw_pairs if len(sw_pairs) > len(cand['pairs']) else cand['pairs']
+                composite = calc_composite(score, identity, coverage, len_ratio, cand['template_id'])
+                add_result({
+                    'template_id': cand['template_id'],
+                    'score': composite,
+                    'identity': max(identity, cand['identity']),
+                    'coverage': max(coverage, cand['coverage']),
+                    'pairs': final_pairs,
+                    'template_seq': t_seq
+                })
+
+            # Keep strong quick-align hits if refine count is low.
+            if len(results_map) < top_k:
+                for cand in preliminary:
+                    if cand['identity'] < LONG_SW_IDENTITY_THRESHOLD:
+                        continue
+                    if cand['coverage'] < LONG_SW_COVERAGE_THRESHOLD:
+                        continue
+                    add_result(cand)
+                    if len(results_map) >= top_k:
+                        break
+
+            # Last-resort SW fallback for long targets to avoid zero-template collapse.
+            if not results_map:
+                for tid, _ in candidates[:LONG_FALLBACK_SW_CANDIDATES]:
+                    t_seq = self._get_sequence(tid)
+                    if not t_seq or len(t_seq) < 5:
+                        continue
+                    len_ratio = min(len(t_seq), query_len) / max(len(t_seq), query_len)
+                    if len_ratio < 0.10:
+                        continue
+                    score, identity, coverage, pairs = sw_align(query_seq, t_seq)
+                    if identity < LONG_SW_IDENTITY_THRESHOLD or coverage < LONG_SW_COVERAGE_THRESHOLD:
+                        continue
+                    composite = calc_composite(score, identity, coverage, len_ratio, tid)
+                    add_result({
+                        'template_id': tid,
+                        'score': composite,
+                        'identity': identity,
+                        'coverage': coverage,
+                        'pairs': pairs,
+                        'template_seq': t_seq
+                    })
+
+            # If still empty, return best quick hits so downstream can try coordinate transfer.
+            if not results_map:
+                for cand in preliminary[:top_k]:
+                    add_result(cand)
+
+        results = list(results_map.values())
         results.sort(key=lambda x: x['score'], reverse=True)
         return results[:top_k]
 
@@ -780,6 +921,9 @@ class RNA3DPredictor:
         msa_path = MSA_DIR / f"{target_id}.MSA.fasta"
         msa_homologs = parse_msa_homologs(msa_path)
         existing_ids = {t['template_id'] for t in templates_found}
+        is_long = n >= LONG_SEQUENCE_THRESHOLD
+        msa_identity_thr = LONG_SW_IDENTITY_THRESHOLD if is_long else IDENTITY_THRESHOLD
+        msa_coverage_thr = LONG_SW_COVERAGE_THRESHOLD if is_long else COVERAGE_THRESHOLD
 
         for hom in msa_homologs[:15]:
             pdb_id = hom['pdb_id']
@@ -788,8 +932,19 @@ class RNA3DPredictor:
                     fid = f"pdb_{pdb_id}_{ch_id}"
                     if fid in existing_ids:
                         continue
-                    score, identity, coverage, pairs = align_sequences(sequence, ch_seq)
-                    if identity >= IDENTITY_THRESHOLD and coverage >= COVERAGE_THRESHOLD:
+                    len_ratio = min(len(ch_seq), n) / max(len(ch_seq), n)
+                    if len_ratio < 0.10:
+                        continue
+
+                    if is_long:
+                        _, q_identity, q_coverage, _ = fast_long_align(sequence, ch_seq)
+                        if q_identity < LONG_QUICK_IDENTITY or q_coverage < LONG_QUICK_COVERAGE:
+                            continue
+                        score, identity, coverage, pairs = sw_align(sequence, ch_seq)
+                    else:
+                        score, identity, coverage, pairs = align_sequences(sequence, ch_seq)
+
+                    if identity >= msa_identity_thr and coverage >= msa_coverage_thr:
                         len_ratio = min(len(ch_seq), n) / max(len(ch_seq), n)
                         composite = (identity * 0.5 + coverage * 0.3 + len_ratio * 0.2) * score
                         templates_found.append({
@@ -828,37 +983,50 @@ class RNA3DPredictor:
         predictions = []
 
         if n_templates >= 5:
-            # Model 0: Best template
+            top_n = min(8, n_templates)
+
+            # Models 0-2: top templates (strong diversity for best-of-5 metric)
             predictions.append(template_coords[0].copy())
-            # Model 1: Ensemble top-3 weighted
-            predictions.append(interpolate_coords(
-                ensemble_coordinates(template_coords[:3], template_scores[:3])
-            ))
-            # Model 2: Ensemble top-5 weighted
+            predictions.append(template_coords[1].copy())
+            predictions.append(template_coords[2].copy())
+
+            # Model 3: weighted ensemble
             predictions.append(interpolate_coords(
                 ensemble_coordinates(template_coords[:5], template_scores[:5])
             ))
-            # Model 3: Second-best template
-            predictions.append(template_coords[1].copy())
-            # Model 4: Third-best + noise
-            pred = template_coords[2].copy()
-            pred += np.random.randn(*pred.shape) * 0.5
-            predictions.append(pred)
 
-        elif n_templates >= 2:
+            # Model 4: coverage-first consensus (exclude best template for diversity)
+            cons_coords = template_coords[1:top_n] if top_n > 2 else template_coords[:top_n]
+            cons_scores = template_scores[1:top_n] if top_n > 2 else template_scores[:top_n]
+            predictions.append(coverage_consensus_coordinates(cons_coords, cons_scores))
+
+        elif n_templates >= 3:
             predictions.append(template_coords[0].copy())
+            predictions.append(template_coords[1].copy())
+            predictions.append(interpolate_coords(
+                ensemble_coordinates(template_coords[:3], template_scores[:3])
+            ))
+            predictions.append(coverage_consensus_coordinates(
+                template_coords, template_scores
+            ))
+            predictions.append(template_coords[2].copy())
+
+        elif n_templates == 2:
+            predictions.append(template_coords[0].copy())
+            predictions.append(template_coords[1].copy())
             predictions.append(interpolate_coords(
                 ensemble_coordinates(template_coords, template_scores)
             ))
-            predictions.append(template_coords[1].copy())
-            for noise in [0.3, 0.6]:
-                pred = template_coords[0].copy()
-                pred += np.random.randn(*pred.shape) * noise
-                predictions.append(pred)
+            predictions.append(coverage_consensus_coordinates(
+                template_coords, template_scores
+            ))
+            blended = 0.7 * template_coords[0] + 0.3 * template_coords[1]
+            predictions.append(interpolate_coords(blended))
 
         elif n_templates == 1:
             predictions.append(template_coords[0].copy())
-            for noise in NOISE_SCALES[1:]:
+            predictions.append(diversify_prediction(template_coords[0], noise_scale=0.05))
+            for noise in [0.08, 0.16, 0.28]:
                 pred = template_coords[0].copy()
                 pred += np.random.randn(*pred.shape) * noise
                 predictions.append(pred)
@@ -885,6 +1053,18 @@ class RNA3DPredictor:
             pred += np.random.randn(*pred.shape) * 0.5
             predictions.append(pred)
         predictions = predictions[:5]
+
+        # Deduplicate models to improve effective best-of-5 coverage.
+        for i in range(1, 5):
+            for j in range(i):
+                if np.allclose(predictions[i], predictions[j], atol=1e-5, rtol=0.0):
+                    alt = None
+                    if n_templates > 1:
+                        alt = template_coords[(i + j) % n_templates]
+                    predictions[i] = diversify_prediction(
+                        predictions[i], alt_coords=alt, noise_scale=0.06 + 0.02 * i
+                    )
+                    break
 
         # Final validation
         for i in range(5):
