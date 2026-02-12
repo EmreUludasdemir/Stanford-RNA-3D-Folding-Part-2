@@ -1679,7 +1679,18 @@ class RNA3DPredictor:
 # ============================================================================
 # ENTRY POINT
 # ============================================================================
-def parse_args():
+def is_notebook_runtime():
+    """Detect Jupyter/Kaggle notebook runtimes that inject kernel argv flags."""
+    if "ipykernel" in sys.modules:
+        return True
+    if os.environ.get("KAGGLE_KERNEL_RUN_TYPE"):
+        return True
+    if os.environ.get("JPY_PARENT_PID"):
+        return True
+    return False
+
+
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Stanford RNA 3D Folding 2 hybrid predictor"
     )
@@ -1721,6 +1732,17 @@ def parse_args():
         default=str(OUTPUT_PATH),
         help="Submission output CSV path",
     )
+
+    # Keep CLI strict, but tolerate notebook-injected kernel args.
+    if argv is not None:
+        return parser.parse_args(argv)
+
+    if is_notebook_runtime():
+        args, unknown = parser.parse_known_args()
+        if unknown:
+            print(f"Ignoring notebook kernel args: {' '.join(unknown)}")
+        return args
+
     return parser.parse_args()
 
 
