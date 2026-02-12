@@ -47,18 +47,28 @@ RNA 3D yapilarini (C1' koordinatlari) hibrit bir yaklasimla tahmin etmek:
 ## Kaggle'da Calistirma
 
 ```bash
-!PYDEVD_DISABLE_FILE_VALIDATION=1 python -Xfrozen_modules=off /kaggle/working/stanford_rna_3d_folding_2.py
+!PYDEVD_DISABLE_FILE_VALIDATION=1 python -Xfrozen_modules=off /kaggle/working/stanford_rna_3d_folding_2.py --mode quality --max_runtime_min 45 --use_external_features 1 --feature_dir /kaggle/input/rna-ss-features-v1
 ```
 
 Not:
 - Debugger warning'leri genelde submission kalitesini etkilemez.
 - Notebook sonunda gelen `nbconvert/traitlets` warning'leri cogunlukla export kaynaklidir.
 
+### Harici Ozellik Dataset Formati (`.npz`)
+
+`--feature_dir` altinda hedef basina bir `.npz` dosyasi okunur:
+
+- `target_id` (string)
+- `pair_prob` (`L x L`, `float16/float32`)
+- `pair_entropy` (`L`, `float16/float32`)
+- `mfe_pair_idx` (`L`, `int16/int32`, eslesmeyen = `-1`)
+- `quality_flag` (`0/1`)
+
 ## Yerelde Calistirma
 
 ```bash
 pip install numpy pandas
-python stanford_rna_3d_folding_2.py
+python stanford_rna_3d_folding_2.py --mode quality --max_runtime_min 45 --use_external_features 1 --feature_dir /kaggle/input/rna-ss-features-v1
 ```
 
 Script varsayilan olarak Kaggle dizinlerini kullanir. Yerelde `INPUT_DIR` ve `OUTPUT_PATH` degerlerini guncellemelisin.
@@ -71,4 +81,3 @@ Script varsayilan olarak Kaggle dizinlerini kullanir. Yerelde `INPUT_DIR` ve `OU
 - [ ] Hedef bazli profiler ciktilari
 - [ ] Test kapsaminda artisim
 - [ ] Deney takibi ve config preset sistemi
-

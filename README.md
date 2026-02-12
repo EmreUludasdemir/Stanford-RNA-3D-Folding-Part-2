@@ -68,18 +68,30 @@ High-performance Kaggle baseline for RNA 3D structure prediction (C1' coordinate
 ## Quick Start (Kaggle Notebook)
 
 ```bash
-!PYDEVD_DISABLE_FILE_VALIDATION=1 python -Xfrozen_modules=off /kaggle/working/stanford_rna_3d_folding_2.py
+!PYDEVD_DISABLE_FILE_VALIDATION=1 python -Xfrozen_modules=off /kaggle/working/stanford_rna_3d_folding_2.py --mode quality --max_runtime_min 45 --use_external_features 1 --feature_dir /kaggle/input/rna-ss-features-v1
 ```
 
 Notes:
 - `-Xfrozen_modules=off` helps avoid debugger breakpoint warnings.
 - `nbconvert/traitlets` warnings at the end of Kaggle logs are usually notebook export warnings, not submission blockers.
 
+### External Feature Dataset Format (`.npz`)
+
+The script can optionally read one file per target from `--feature_dir`:
+
+- `target_id` (string)
+- `pair_prob` (`L x L`, `float16/float32`)
+- `pair_entropy` (`L`, `float16/float32`)
+- `mfe_pair_idx` (`L`, `int16/int32`, unpaired = `-1`)
+- `quality_flag` (`0/1`)
+
+If a target feature file is missing, the predictor automatically falls back to pure TBM scoring.
+
 ## Local Run
 
 ```bash
 pip install numpy pandas
-python stanford_rna_3d_folding_2.py
+python stanford_rna_3d_folding_2.py --mode quality --max_runtime_min 45 --use_external_features 1 --feature_dir /kaggle/input/rna-ss-features-v1
 ```
 
 The script uses Kaggle paths by default. For local usage, update `INPUT_DIR` and `OUTPUT_PATH` in `stanford_rna_3d_folding_2.py`.
@@ -95,6 +107,10 @@ The script uses Kaggle paths by default. For local usage, update `INPUT_DIR` and
 | `SHORT_PREFILTER_CAP` | Candidate cap for regular targets |
 | `LONG_PREFILTER_CAP` | Candidate cap for long targets |
 | `NOISE_SCALES` | Diversity controls for 5 output models |
+| `--mode` | Runtime/quality preset (`fast` or `quality`) |
+| `--max_runtime_min` | Runtime guard budget |
+| `--feature_dir` | External `.npz` feature path |
+| `--use_external_features` | Toggle external feature scoring |
 
 ## Roadmap
 
