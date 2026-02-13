@@ -1352,7 +1352,8 @@ def summarize_submission_metrics(submission):
             np.isclose(submission[f'y_{a}'], submission[f'y_{b}']) &
             np.isclose(submission[f'z_{a}'], submission[f'z_{b}'])
         )
-        dup_any |= dup.values
+        dup_bool = np.asarray(dup, dtype=bool)
+        dup_any |= dup_bool
 
     dup_ratio = float(np.mean(dup_any)) if len(dup_any) > 0 else 0.0
     print("\nSubmission diagnostics:")
@@ -1672,7 +1673,10 @@ class RNA3DPredictor:
         print(f"Shape: {submission.shape}")
         print(f"Targets: {len(self.test_df)}")
         print(f"\nSample:\n{submission.head()}")
-        summarize_submission_metrics(submission)
+        try:
+            summarize_submission_metrics(submission)
+        except Exception as exc:
+            print(f"Submission diagnostics skipped: {exc}")
         return submission
 
 
@@ -1688,6 +1692,59 @@ def is_notebook_runtime():
     if os.environ.get("JPY_PARENT_PID"):
         return True
     return False
+
+
+def count_npz_files(path, max_count=None):
+    """Count .npz files under path; optionally stop early at max_count."""
+    p = Path(path)
+    if not p.exists() or not p.is_dir():
+        return 0
+    count = 0
+    try:
+        for _ in p.rglob("*.npz"):
+            count += 1
+            if max_count is not None and count >= max_count:
+                break
+    except Exception:
+        return 0
+    return count
+
+
+def resolve_feature_dir(feature_dir_arg, use_external_features):
+    """
+    Resolve external feature directory for notebook runs.
+    Returns: (resolved_dir, enabled, file_count, autodetected, warning_msg)
+    """
+    requested = bool(use_external_features)
+    requested_path = Path(feature_dir_arg)
+    if not requested:
+        return requested_path, False, 0, False, None
+
+    candidates = [
+        requested_path,
+        Path("/kaggle/input/stanford-rna-3d-folding-seq-feature-extraction"),
+        Path("/kaggle/input/rna-ss-features-v1"),
+    ]
+    unique_candidates = []
+    seen = set()
+    for cand in candidates:
+        key = str(cand)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_candidates.append(cand)
+
+    for cand in unique_candidates:
+        if count_npz_files(cand, max_count=1) > 0:
+            file_count = count_npz_files(cand)
+            autodetected = str(cand) != str(requested_path)
+            return cand, True, file_count, autodetected, None
+
+    warning = (
+        "External feature store requested but no valid .npz dataset found; "
+        "continuing without external features."
+    )
+    return requested_path, False, 0, False, warning
 
 
 def parse_args(argv=None):
@@ -1753,12 +1810,26 @@ if __name__ == "__main__":
     PDB_DIR = INPUT_DIR / "PDB_RNA"
     MSA_DIR = INPUT_DIR / "MSA"
     OUTPUT_PATH = Path(args.output_path)
+    resolved_feature_dir, resolved_use_external_features, resolved_feature_count, autodetected, feature_warning = (
+        resolve_feature_dir(args.feature_dir, args.use_external_features)
+    )
+
+    print(f"Feature requested: {'on' if bool(args.use_external_features) else 'off'}")
+    print(f"Feature dir: {resolved_feature_dir}")
+    print(f"Feature files: {resolved_feature_count}")
+    if autodetected:
+        print(
+            f"Auto-detected external feature store: {resolved_feature_dir} "
+            f"({resolved_feature_count} files)"
+        )
+    if feature_warning:
+        print(feature_warning)
 
     start_time = time.time()
     predictor = RNA3DPredictor(
         mode=args.mode,
-        feature_dir=Path(args.feature_dir),
-        use_external_features=bool(args.use_external_features),
+        feature_dir=resolved_feature_dir,
+        use_external_features=bool(resolved_use_external_features),
         max_runtime_min=args.max_runtime_min,
     )
     submission = predictor.create_submission()
